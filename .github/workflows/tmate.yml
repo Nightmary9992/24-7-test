@@ -1,7 +1,8 @@
 name: Create VPS
 
 on:
-  repository_dispatch:
+  workflow_dispatch:      # ✅ Manual "Run workflow" button
+  repository_dispatch:    # ✅ Can still be triggered by API or other workflows
     types: [create-vps]
 
 jobs:
