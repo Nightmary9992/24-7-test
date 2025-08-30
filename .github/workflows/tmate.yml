@@ -8,82 +8,59 @@ on:
 jobs:
   start-vps:
     runs-on: ubuntu-latest
-    timeout-minutes: 355   # Run slightly less than 6h (to avoid hitting the hard cap)
+    timeout-minutes: 355   # Run slightly less than 6h
 
     steps:
       - name: ⬇️ Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: 📂 Prepare dirs
         run: mkdir -p links .backup
-
-      - name: 📦 Restore backup
-        run: |
-          name="${{ github.event.client_payload.vps_name }}"
-          if [ "${{ github.event.client_payload.backup }}" == "true" ]; then
-            echo "🔄 Restoring backup..."
-            unzip ".backup/$name.zip" -d . || echo "⚠️ No backup found."
-          fi
 
       - name: 🐳 Install Docker & deps
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            ca-certificates \
-            curl \
-            gnupg \
-            lsb-release \
-            unzip \
-            jq \
-            php \
-            php-cli \
-            mysql-server \
-            tmate
+            ca-certificates curl gnupg lsb-release unzip jq \
+            php php-cli tmate
 
-          # Start MySQL and set root password
-          sudo systemctl start mysql
-          sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'rootpass'; FLUSH PRIVILEGES;"
-
-          # Purge conflicting containerd
-          sudo apt-get remove -y containerd || true
-          sudo apt-get autoremove -y
-
-          # Add official Docker repo
-          sudo mkdir -p /etc/apt/keyrings
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-          echo \
-            "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-            $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-          # Install Docker CE + plugins
-          sudo apt-get update
-          sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-
-          # Verify installation
+          # Install docker (from ubuntu repo, stable)
+          sudo apt-get install -y docker.io
           docker --version
-          docker compose version
 
-
-      - name: 🔧 Run Pterodactyl Panel + Wings
+      - name: 🛢️ Start MySQL in Docker
         run: |
-          # Stop old containers if exist
-          docker rm -f pterodactyl wings || true
+          docker run -d \
+            --name mysql \
+            -e MYSQL_ROOT_PASSWORD=rootpass \
+            -e MYSQL_DATABASE=panel \
+            -e MYSQL_USER=admin \
+            -e MYSQL_PASSWORD=adminpass \
+            -p 3306:3306 \
+            mysql:8.0
+          # Wait until container is ready
+          echo "⏳ Waiting for MySQL..."
+          for i in {1..30}; do
+            docker exec mysql mysql -uroot -prootpass -e "SELECT 1;" && break
+            sleep 2
+          done
 
-          # Panel container with persistent volume
+      - name: 🔧 Install Pterodactyl Panel + Wings
+        run: |
+          # Panel
           docker run -d --name pterodactyl \
+            --link mysql:mysql \
             -p 8080:80 \
-            -e DB_HOST=127.0.0.1 \
+            -e DB_HOST=mysql \
             -e DB_PORT=3306 \
             -e DB_DATABASE=panel \
             -e DB_USERNAME=root \
             -e DB_PASSWORD=rootpass \
-            -v panel_data:/app \
             ghcr.io/pterodactyl/panel:latest
 
-          echo "⌛ Waiting for Panel to boot..."
-          sleep 40
+          sleep 45
 
-          # Wings (daemon) with auto-start enabled
+          # Wings
           docker run -d --name wings \
             --privileged \
             --network host \
@@ -109,22 +86,22 @@ jobs:
           SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
           PANEL_URL="http://$(curl -s ifconfig.me):8080"
 
-          echo "$SSH" > "links/${{ github.event.client_payload.vps_name }}.txt"
-          echo "$PANEL_URL" > "links/${{ github.event.client_payload.vps_name }}_panel.txt"
+          echo "$SSH" > "links/${{ github.event.client_payload.vps_name || 'autovps' }}.txt"
+          echo "$PANEL_URL" > "links/${{ github.event.client_payload.vps_name || 'autovps' }}_panel.txt"
 
           curl -H "Content-Type: application/json" -X POST \
-            -d "{\"content\": \"✅ VPS Ready!\\n🌐 Panel: $PANEL_URL\\n👑 Admin: admin@example.com / AdminPass123\\n🔑 SSH: $SSH\"}" \
+            -d "{\"content\": \"✅ VPS Ready!\n🌐 Panel: $PANEL_URL\n👑 Admin: admin@example.com / AdminPass123\n🔑 SSH: $SSH\"}" \
             "https://discord.com/api/webhooks/1354349049410490418/XaRlJspNCk8h8QMkY329QVqNOP2BiJ-hx_1MA00EDSNDXFDJxwPAbjReNuKeGfweTA7X"
 
       - name: 💾 Save backup
         run: |
-          name="${{ github.event.client_payload.vps_name }}"
+          name="${{ github.event.client_payload.vps_name || 'autovps' }}"
           zip -r ".backup/$name.zip" * .git/** ".github/**" ".backup/**" || true
 
       - name: ⬆️ Push
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "🔄 Updated SSH + backup for ${{ github.event.client_payload.vps_name }}"
+          commit_message: "🔄 Updated SSH + backup for ${{ github.event.client_payload.vps_name || 'autovps' }}"
           file_pattern: 'links/*.txt .backup/*.zip'
 
       - name: 🔁 Re-trigger workflow
