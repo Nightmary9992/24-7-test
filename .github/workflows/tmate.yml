@@ -1,14 +1,14 @@
 name: Create VPS
 
 on:
-  workflow_dispatch:      # ✅ Manual "Run workflow" button
-  repository_dispatch:    # ✅ Can still be triggered by API or other workflows
+  workflow_dispatch:
+  repository_dispatch:
     types: [create-vps]
 
 jobs:
   start-vps:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 hours max
+    timeout-minutes: 355   # Run slightly less than 6h (to avoid hitting the hard cap)
 
     steps:
       - name: ⬇️ Checkout
@@ -47,7 +47,11 @@ jobs:
           commit_message: "🔄 Updated SSH + backup for ${{ github.event.client_payload.vps_name }}"
           file_pattern: 'links/*.txt .backup/*.zip'
 
-      - name: ⏳ Keep session alive
+      - name: 🔁 Re-trigger workflow
+        if: always()
         run: |
-          echo "🔄 Keeping session alive for 6 hours..."
-          sleep $((360 * 60))
+          echo "🔄 Re-triggering workflow before timeout..."
+          curl -X POST https://api.github.com/repos/${{ github.repository }}/dispatches \
+          -H "Accept: application/vnd.github.v3+json" \
+          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          -d '{ "event_type": "create-vps", "client_payload": { "vps_name": "autovps", "backup": true }}'
