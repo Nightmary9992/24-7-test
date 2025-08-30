@@ -25,31 +25,7 @@ jobs:
             unzip ".backup/$name.zip" -d . || echo "⚠️ No backup to restore."
           fi
 
-      - name: 🔌 Start tmate session
-        run: |
-          echo "🔄 Launching tmate..."
-          sudo apt install -y tmate
-          tmate -S /tmp/tmate.sock new-session -d
-          tmate -S /tmp/tmate.sock wait tmate-ready
-          SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-          echo "$SSH" > "links/${{ github.event.client_payload.vps_name }}.txt"
-          echo "✅ SSH Ready: $SSH"
-          echo "$SSH" > ssh_link.txt
-
-      - name: 🌐 Install ngrok
-        run: |
-          curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
-          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
-          sudo apt update && sudo apt install -y ngrok
-
-      - name: 🌐 Start ngrok tunnel for panel
-        run: |
-          nohup ngrok http 80 --log=stdout > ngrok.log 2>&1 &
-          sleep 10
-          PANEL_URL=$(curl --silent http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[0].public_url')
-          echo "$PANEL_URL" > links/panel_url.txt
-
-      - name: 🐳 Install Docker & Docker Compose
+      - name: 🐳 Install Docker & deps
         run: |
           sudo apt-get remove -y docker.io containerd runc || true
           sudo apt-get update
@@ -57,7 +33,12 @@ jobs:
             ca-certificates \
             curl \
             gnupg \
-            lsb-release
+            lsb-release \
+            unzip \
+            jq \
+            php \
+            php-cli \
+            mysql-server
           sudo mkdir -p /etc/apt/keyrings
           curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
           echo \
@@ -68,41 +49,45 @@ jobs:
           docker --version
           docker compose version
 
-      - name: 🛠 Install Pterodactyl Panel + Wings
+      - name: 🔧 Install Pterodactyl Panel + Wings
         run: |
-          sudo apt-get install -y mysql-server php php-cli unzip
-          sudo systemctl start mysql
-          sudo mysql -e "CREATE DATABASE IF NOT EXISTS panel;"
-          sudo mysql -e "CREATE USER IF NOT EXISTS 'ptero'@'localhost' IDENTIFIED BY 'password';"
-          sudo mysql -e "GRANT ALL PRIVILEGES ON panel.* TO 'ptero'@'localhost'; FLUSH PRIVILEGES;"
-          curl -Lo panel.tar.gz https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz
-          mkdir -p /var/www/pterodactyl
-          tar -xzvf panel.tar.gz -C /var/www/pterodactyl --strip-components=1
-          cd /var/www/pterodactyl && cp .env.example .env
-          php artisan key:generate --force
-          php artisan migrate --force
-          php artisan db:seed --force
-          php artisan p:user:make --email=admin@ptero.local --admin=1 --username=admin --name-first=Admin --name-last=User --password=SuperSecret123 || true
-          docker run -d --name pterodactyl-wings --restart unless-stopped \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v /var/lib/pterodactyl:/var/lib/pterodactyl \
-            quay.io/pterodactyl/wings:latest
+          git clone https://github.com/pterodactyl/panel panel
+          cd panel
+          cp .env.example .env
+          php artisan key:generate
+          cd ..
+          
+          # Start panel with Docker
+          docker run -d --name pterodactyl -p 8080:80 ghcr.io/pterodactyl/panel:latest
 
-      - name: 📩 Send Discord Notification
+          # Start wings (daemon)
+          docker run -d --name wings --privileged --network host ghcr.io/pterodactyl/wings:latest
+
+      - name: 👑 Create Admin User
         run: |
-          ADMIN_EMAIL="admin@ptero.local"
-          ADMIN_PASS="SuperSecret123"
-          PANEL_URL=$(cat links/panel_url.txt)
-          SSH=$(cat ssh_link.txt)
+          docker exec pterodactyl php artisan p:user:make \
+            --email=admin@example.com \
+            --username=admin \
+            --name-first=Auto \
+            --name-last=Admin \
+            --password=AdminPass123 \
+            --admin=1 || true
 
-          CONTENT="🖥️ **Pterodactyl Panel is Ready!**\n\n🌐 URL: $PANEL_URL\n👤 Email: $ADMIN_EMAIL\n🔑 Password: $ADMIN_PASS\n\n🔑 SSH: $SSH\n\n⚡ This link will expire after 6h."
+      - name: 🔌 Start tmate session + Discord notify
+        run: |
+          echo "🔄 Launching tmate..."
+          sudo apt install -y tmate
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+          SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
+          echo "$SSH" > "links/${{ github.event.client_payload.vps_name }}.txt"
 
-          JSON=$(jq -n --arg content "$CONTENT" '{content: $content}')
+          PANEL_URL="http://$(curl -s ifconfig.me):8080"
+          echo "$PANEL_URL" > "links/${{ github.event.client_payload.vps_name }}_panel.txt"
 
-          curl -H "Content-Type: application/json" \
-               -X POST \
-               -d "$JSON" \
-               "https://discord.com/api/webhooks/1354349049410490418/XaRlJspNCk8h8QMkY329QVqNOP2BiJ-hx_1MA00EDSNDXFDJxwPAbjReNuKeGfweTA7X"
+          curl -H "Content-Type: application/json" -X POST \
+            -d "{\"content\": \"✅ VPS Ready!\\n🌐 Panel: $PANEL_URL\\n👑 Admin: admin@example.com / AdminPass123\\n🔑 SSH: $SSH\"}" \
+            "https://discord.com/api/webhooks/1354349049410490418/XaRlJspNCk8h8QMkY329QVqNOP2BiJ-hx_1MA00EDSNDXFDJxwPAbjReNuKeGfweTA7X"
 
       - name: 💾 Save backup
         run: |
