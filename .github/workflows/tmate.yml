@@ -141,11 +141,11 @@ EOF
           cd $GITHUB_WORKSPACE/temp
           curl -s -L "https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-linux-amd64.zip" -o ngrok.zip
           unzip -o ngrok.zip >/dev/null 2>&1 || true
-          chmod +x ngrok || true
+          chmod +x ngrok
           nohup ./ngrok http 8080 >/dev/null 2>&1 &
           sleep 6
           PANEL_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[0].public_url' || echo "")
-          if [ -z "$PANEL_URL" ] || [ "$PANEL_URL" == "null" ]; then
+          if [ -z "$PANEL_URL" ] || [ "$PANEL_URL" = "null" ]; then
             PANEL_URL="http://$(curl -s ifconfig.me | tr -d '\n'):8080"
           fi
           echo "$PANEL_URL" | tee links/panel_url.txt
