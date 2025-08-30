@@ -1,170 +1,52 @@
 name: Create VPS
 
 on:
-  workflow_dispatch:
   repository_dispatch:
     types: [create-vps]
 
 jobs:
   start-vps:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
-
-    env:
-      DISCORD_WEBHOOK: "https://discord.com/api/webhooks/1354349049410490418/XaRlJspNCk8h8QMkY329QVqNOP2BiJ-hx_1MA00EDSNDXFDJxwPAbjReNuKeGfweTA7X"
+    timeout-minutes: 360  # 6 hours max
 
     steps:
-      - name: ⬇️ Checkout repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: ⬇️ Checkout
+        uses: actions/checkout@v3
 
-      - name: 📂 Prepare workspace
+      - name: 📂 Create dirs
+        run: mkdir -p links .backup
+
+      - name: 📦 Restore backup
         run: |
-          mkdir -p $GITHUB_WORKSPACE/links $GITHUB_WORKSPACE/temp $GITHUB_WORKSPACE/.backup
-          chmod 777 $GITHUB_WORKSPACE/links $GITHUB_WORKSPACE/temp $GITHUB_WORKSPACE/.backup
-
-      - name: 🧰 Install tools
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y unzip jq curl git || true
-          if ! command -v tmate >/dev/null 2>&1; then sudo apt-get install -y tmate || true; fi
-          if ! command -v docker >/dev/null 2>&1; then curl -fsSL https://get.docker.com | sh; fi
-          docker --version || true
-
-      - name: Set Laravel APP_KEY
-        run: |
-          APP_KEY="base64:0nYbJe1iR9o0bLJYy7exKgDq+Zoy7Z9Wm8rKpW63g2k="
-          echo "APP_KEY=$APP_KEY" >> $GITHUB_WORKSPACE/.env
-
-      - name: 🕸 Create Docker network
-        run: docker network create pteronet || true
-
-      - name: 🛢 Remove MySQL volume
-        run: docker volume rm pterodactyl_mysql_data || true
-
-      - name: 🛢 Start MySQL
-        run: |
-          docker rm -f pterodactyl_mysql || true
-          docker run -d --name pterodactyl_mysql \
-            --network pteronet \
-            -v pterodactyl_mysql_data:/var/lib/mysql \
-            -e MYSQL_ROOT_PASSWORD=rootpass \
-            -e MYSQL_DATABASE=pterodactyl_db \
-            -e MYSQL_USER=ptero \
-            -e MYSQL_PASSWORD=pteropass \
-            mysql:8.0 --default-authentication-plugin=mysql_native_password
-          echo "Waiting for MySQL..."
-          for i in $(seq 1 30); do
-            docker exec pterodactyl_mysql mysql -uroot -prootpass -e "SELECT 1;" >/dev/null 2>&1 && break
-            sleep 2
-          done
-
-      - name: 🟢 Start Redis
-        run: |
-          docker rm -f pterodactyl_redis || true
-          docker run -d --name pterodactyl_redis --network pteronet redis:alpine
-
-      - name: 🔧 Start Pterodactyl Panel
-        run: |
-          docker rm -f pterodactyl || true
-          docker volume create pterodactyl_panel_data || true
-          docker run -d --name pterodactyl \
-            --network pteronet \
-            -p 8080:80 \
-            -e DB_HOST=pterodactyl_mysql \
-            -e DB_PORT=3306 \
-            -e DB_DATABASE=pterodactyl_db \
-            -e DB_USERNAME=ptero \
-            -e DB_PASSWORD=pteropass \
-            -e REDIS_HOST=pterodactyl_redis \
-            -e APP_KEY="base64:0nYbJe1iR9o0bLJYy7exKgDq+Zoy7Z9Wm8rKpW63g2k=" \
-            -v pterodactyl_panel_data:/var/www/pterodactyl \
-            ghcr.io/pterodactyl/panel:latest
-          for i in $(seq 1 30); do
-            docker exec pterodactyl php -v >/dev/null 2>&1 && break
-            sleep 3
-          done
-
-      - name: ⚙️ Run migrations safely
-        run: docker exec pterodactyl php artisan migrate:fresh --force || true
-
-      - name: 👑 Create admin user
-        run: |
-          ADMIN_EMAIL="admin@example.com"
-          ADMIN_PASS="AdminPass123"
-          docker exec -i pterodactyl php artisan p:user:make \
-            --email="$ADMIN_EMAIL" \
-            --username="admin" \
-            --name-first="Auto" \
-            --name-last="Admin" \
-            --password="$ADMIN_PASS" \
-            --admin=1 || true
-          echo "EMAIL:$ADMIN_EMAIL" > $GITHUB_WORKSPACE/links/admin_info.txt
-          echo "PASS:$ADMIN_PASS" >> $GITHUB_WORKSPACE/links/admin_info.txt
-
-      - name: 🐉 Start Wings container
-        run: |
-          printf 'panel:\n  url: "http://pterodactyl"\n  token_id: "localtoken"\n  token: "localtoken123"\n  verify_tls: false\napi:\n  host: 0.0.0.0\n  port: 8080\ndocker:\n  network:\n    interface: docker0\n' > $GITHUB_WORKSPACE/temp/wings.yml
-          docker rm -f pterodactyl_wings || true
-          docker run -d --name pterodactyl_wings \
-            --privileged \
-            --network pteronet \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v /etc/pterodactyl:/etc/pterodactyl:rw \
-            -v /var/lib/pterodactyl:/var/lib/pterodactyl:rw \
-            -v $GITHUB_WORKSPACE/temp/wings.yml:/etc/pterodactyl/config.yml \
-            ghcr.io/pterodactyl/wings:latest || true
-          sleep 8
-          docker logs pterodactyl_wings --tail 50 || true
-
-      - name: 🌐 Install & start ngrok
-        run: |
-          cd $GITHUB_WORKSPACE/temp
-          curl -s -L "https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-linux-amd64.zip" -o ngrok.zip
-          unzip -o ngrok.zip >/dev/null 2>&1 || true
-          chmod +x ngrok
-          nohup ./ngrok http 8080 >/dev/null 2>&1 &
-          sleep 6
-          PANEL_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[0].public_url' || echo "")
-          if [ -z "$PANEL_URL" ] || [ "$PANEL_URL" = "null" ]; then
-            PANEL_URL="http://$(curl -s ifconfig.me | tr -d '\n'):8080"
+          name="${{ github.event.client_payload.vps_name }}"
+          if [ "${{ github.event.client_payload.backup }}" == "true" ]; then
+            echo "🔄 Restoring backup..."
+            unzip ".backup/$name.zip" -d . || echo "⚠️ No backup to restore."
           fi
-          echo "$PANEL_URL" | tee $GITHUB_WORKSPACE/links/panel_url.txt || true
 
-      - name: 🔌 Start tmate & capture SSH
+      - name: 🔌 Start tmate session
         run: |
-          VPS_NAME="${GITHUB_EVENT_CLIENT_PAYLOAD_VPS_NAME:-autovps}"
+          echo "🔄 Launching tmate..."
+          sudo apt install -y tmate
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
           SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-          echo "$SSH" | tee "$GITHUB_WORKSPACE/links/${VPS_NAME}.txt"
-          echo "SSH:$SSH" >> $GITHUB_WORKSPACE/links/admin_info.txt || true
+          echo "$SSH" > "links/${{ github.event.client_payload.vps_name }}.txt"
+          echo "✅ SSH Ready: $SSH"
+          sleep 60 # give time for GitHub to sync
 
-      - name: 💾 Backup DB & Wings config
+      - name: 💾 Save backup
         run: |
-          docker exec pterodactyl_mysql sh -c 'exec mysqldump -uptero -ppteropass pterodactyl_db' > $GITHUB_WORKSPACE/.backup/pterodactyl.sql || true
-          cp $GITHUB_WORKSPACE/temp/wings.yml $GITHUB_WORKSPACE/.backup/wings.yml || true
+          name="${{ github.event.client_payload.vps_name }}"
+          zip -r ".backup/$name.zip" * .git/** ".github/**" ".backup/**" || true
 
-      - name: 💼 Pack backups
-        run: |
-          VPS_NAME="${GITHUB_EVENT_CLIENT_PAYLOAD_VPS_NAME:-autovps}"
-          zip -r "$GITHUB_WORKSPACE/.backup/${VPS_NAME}.zip" $GITHUB_WORKSPACE/.backup/* $GITHUB_WORKSPACE/links/* 2>/dev/null || true
-
-      - name: 🛠 Commit & push backups
+      - name: ⬆️ Push
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "🔄 Updated SSH, Panel URL, admin info, and backups for ${GITHUB_EVENT_CLIENT_PAYLOAD_VPS_NAME:-autovps}"
-          file_pattern: '.backup/*.zip .backup/*.sql .backup/*.yml links/*.txt'
-          commit_user_name: "github-actions[bot]"
-          commit_user_email: "41898282+github-actions[bot]@users.noreply.github.com"
-          push_options: '--force-with-lease'
+          commit_message: "🔄 Updated SSH + backup for ${{ github.event.client_payload.vps_name }}"
+          file_pattern: 'links/*.txt .backup/*.zip'
 
-      - name: 🔁 Auto-trigger next VPS
-        if: ${{ github.event_name != 'repository_dispatch' }}
+      - name: ⏳ Keep session alive
         run: |
-          curl -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: token ${{ secrets.PAT_TOKEN }}" \
-            https://api.github.com/repos/${{ github.repository }}/dispatches \
-            -d '{"event_type":"create-vps", "client_payload": {"VPS_NAME": "autovps"}}'
+          echo "🔄 Keeping session alive for 6 hours..."
+          sleep $((360 * 60))
