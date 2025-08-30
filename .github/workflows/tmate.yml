@@ -14,7 +14,7 @@ jobs:
       DISCORD_WEBHOOK: "https://discord.com/api/webhooks/1354349049410490418/XaRlJspNCk8h8QMkY329QVqNOP2BiJ-hx_1MA00EDSNDXFDJxwPAbjReNuKeGfweTA7X"
 
     steps:
-      - name: ⬇️ Checkout
+      - name: ⬇️ Checkout repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -82,18 +82,13 @@ jobs:
             sleep 3
           done
 
-      - name: ⚙️ Run migrations
+      - name: ⚙️ Run migrations safely
         run: |
-          for i in $(seq 1 20); do
-            docker exec pterodactyl php artisan migrate --force && break || {
-              echo "Retry artisan migrate ($i/20)"
-              sleep 10
-            }
-          done
+          docker exec pterodactyl php artisan migrate:fresh --force
 
-      - name: 👑 Ensure admin user exists
+      - name: 👑 Create admin user
         run: |
-          mkdir -p links
+          mkdir -p $GITHUB_WORKSPACE/links
           ADMIN_EMAIL="admin@example.com"
           ADMIN_PASS="AdminPass123"
           docker exec -i pterodactyl php artisan p:user:make \
@@ -103,10 +98,10 @@ jobs:
             --name-last="Admin" \
             --password="$ADMIN_PASS" \
             --admin=1 || true
-          echo "EMAIL:$ADMIN_EMAIL" > links/admin_info.txt
-          echo "PASS:$ADMIN_PASS" >> links/admin_info.txt
+          echo "EMAIL:$ADMIN_EMAIL" > $GITHUB_WORKSPACE/links/admin_info.txt
+          echo "PASS:$ADMIN_PASS" >> $GITHUB_WORKSPACE/links/admin_info.txt
 
-      - name: 🐉 Write Wings config & start container
+      - name: 🐉 Start Wings container
         run: |
           mkdir -p temp
           printf 'panel:\n  url: "http://pterodactyl"\n  token_id: "localtoken"\n  token: "localtoken123"\n  verify_tls: false\napi:\n  host: 0.0.0.0\n  port: 8080\ndocker:\n  network:\n    interface: docker0\n' > temp/wings.yml
@@ -134,48 +129,41 @@ jobs:
           if [ -z "$PANEL_URL" ] || [ "$PANEL_URL" = "null" ]; then
             PANEL_URL="http://$(curl -s ifconfig.me | tr -d '\n'):8080"
           fi
-          echo "$PANEL_URL" | tee links/panel_url.txt
+          mkdir -p $GITHUB_WORKSPACE/links
+          echo "$PANEL_URL" | tee $GITHUB_WORKSPACE/links/panel_url.txt || true
 
-      - name: 🔌 Start tmate session & capture SSH
+      - name: 🔌 Start tmate & capture SSH
         run: |
           if ! command -v tmate >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y tmate; fi
           VPS_NAME="${GITHUB_EVENT_CLIENT_PAYLOAD_VPS_NAME:-autovps}"
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
           SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-          echo "$SSH" | tee "links/${VPS_NAME}.txt"
-          echo "SSH:$SSH" >> links/admin_info.txt || true
+          echo "$SSH" | tee "$GITHUB_WORKSPACE/links/${VPS_NAME}.txt"
+          echo "SSH:$SSH" >> $GITHUB_WORKSPACE/links/admin_info.txt || true
 
-      - name: 💾 Dump MySQL DB
+      - name: 💾 Backup DB & Wings config
         run: |
           mkdir -p .backup
           docker exec pterodactyl_mysql sh -c 'exec mysqldump -uptero -ppteropass pterodactyl_db' > .backup/pterodactyl.sql || true
           cp temp/wings.yml .backup/wings.yml || true
 
-      - name: 💾 Save panel files
+      - name: 💾 Backup panel files
         run: |
           rm -f .backup/panel_files.tar.gz || true
           docker exec pterodactyl sh -c "tar -czf /tmp/panel_files.tar.gz /var/www/pterodactyl 2>/dev/null || true" || true
           docker cp pterodactyl:/tmp/panel_files.tar.gz .backup/panel_files.tar.gz 2>/dev/null || true
 
-      - name: 💼 Pack all backups
+      - name: 💼 Pack backups
         run: |
           VPS_NAME="${GITHUB_EVENT_CLIENT_PAYLOAD_VPS_NAME:-autovps}"
-          zip -r ".backup/${VPS_NAME}.zip" .backup/* links/* 2>/dev/null || true
+          zip -r ".backup/${VPS_NAME}.zip" .backup/* $GITHUB_WORKSPACE/links/* 2>/dev/null || true
 
-      - name: 🛠 Prepare Git
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git fetch origin main || true
-          git checkout main || true
-          git pull --rebase origin main || true
-
-      - name: ⬆️ Commit & Push backups
+      - name: 🛠 Commit & push backups
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "🔄 Updated SSH, Panel URL, admin info, and backups for ${GITHUB_EVENT_CLIENT_PAYLOAD_VPS_NAME:-autovps}"
-          file_pattern: 'links/*.txt .backup/*.zip .backup/*.sql .backup/*.yml'
+          file_pattern: '.backup/*.zip .backup/*.sql .backup/*.yml links/*.txt'
           commit_user_name: "github-actions[bot]"
           commit_user_email: "41898282+github-actions[bot]@users.noreply.github.com"
           push_options: '--force-with-lease'
