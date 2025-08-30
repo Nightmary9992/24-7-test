@@ -43,11 +43,9 @@ jobs:
           # Fix MySQL auth issue: set root password + enable native password
           sudo systemctl start mysql
           sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'rootpass'; FLUSH PRIVILEGES;"
-
-          # Test login
           mysql -uroot -prootpass -e "SELECT version();"
 
-          # Install docker
+          # Install Docker repo cleanly
           sudo mkdir -p /etc/apt/keyrings
           curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
           echo \
@@ -57,9 +55,12 @@ jobs:
           sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
           docker --version
 
-      - name: 🔧 Install Pterodactyl Panel + Wings
+      - name: 🔧 Run Pterodactyl Panel + Wings
         run: |
-          # Panel container
+          # Stop old containers if exist
+          docker rm -f pterodactyl wings || true
+
+          # Panel container with persistent volume
           docker run -d --name pterodactyl \
             -p 8080:80 \
             -e DB_HOST=127.0.0.1 \
@@ -67,10 +68,11 @@ jobs:
             -e DB_DATABASE=panel \
             -e DB_USERNAME=root \
             -e DB_PASSWORD=rootpass \
+            -v panel_data:/app \
             ghcr.io/pterodactyl/panel:latest
 
-          # Wait until panel responds
-          sleep 30
+          echo "⌛ Waiting for Panel to boot..."
+          sleep 40
 
           # Wings (daemon) with auto-start enabled
           docker run -d --name wings \
