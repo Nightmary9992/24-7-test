@@ -14,7 +14,7 @@ jobs:
       - name: ⬇️ Checkout
         uses: actions/checkout@v3
 
-      - name: 📂 Create dirs
+      - name: 📂 Prepare dirs
         run: mkdir -p links .backup
 
       - name: 📦 Restore backup
@@ -22,12 +22,11 @@ jobs:
           name="${{ github.event.client_payload.vps_name }}"
           if [ "${{ github.event.client_payload.backup }}" == "true" ]; then
             echo "🔄 Restoring backup..."
-            unzip ".backup/$name.zip" -d . || echo "⚠️ No backup to restore."
+            unzip ".backup/$name.zip" -d . || echo "⚠️ No backup found."
           fi
 
       - name: 🐳 Install Docker & deps
         run: |
-          sudo apt-get remove -y docker.io containerd runc || true
           sudo apt-get update
           sudo apt-get install -y \
             ca-certificates \
@@ -38,30 +37,49 @@ jobs:
             jq \
             php \
             php-cli \
-            mysql-server
+            mysql-server \
+            tmate
+
+          # Fix MySQL auth issue: set root password + enable native password
+          sudo systemctl start mysql
+          sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'rootpass'; FLUSH PRIVILEGES;"
+
+          # Test login
+          mysql -uroot -prootpass -e "SELECT version();"
+
+          # Install docker
           sudo mkdir -p /etc/apt/keyrings
           curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
           echo \
             "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
             $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
           sudo apt-get update
-          sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+          sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
           docker --version
-          docker compose version
 
       - name: 🔧 Install Pterodactyl Panel + Wings
         run: |
-          git clone https://github.com/pterodactyl/panel panel
-          cd panel
-          cp .env.example .env
-          php artisan key:generate
-          cd ..
-          
-          # Start panel with Docker
-          docker run -d --name pterodactyl -p 8080:80 ghcr.io/pterodactyl/panel:latest
+          # Panel container
+          docker run -d --name pterodactyl \
+            -p 8080:80 \
+            -e DB_HOST=127.0.0.1 \
+            -e DB_PORT=3306 \
+            -e DB_DATABASE=panel \
+            -e DB_USERNAME=root \
+            -e DB_PASSWORD=rootpass \
+            ghcr.io/pterodactyl/panel:latest
 
-          # Start wings (daemon)
-          docker run -d --name wings --privileged --network host ghcr.io/pterodactyl/wings:latest
+          # Wait until panel responds
+          sleep 30
+
+          # Wings (daemon) with auto-start enabled
+          docker run -d --name wings \
+            --privileged \
+            --network host \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v /etc/pterodactyl:/etc/pterodactyl \
+            -v /var/lib/pterodactyl:/var/lib/pterodactyl \
+            ghcr.io/pterodactyl/wings:latest
 
       - name: 👑 Create Admin User
         run: |
@@ -73,16 +91,14 @@ jobs:
             --password=AdminPass123 \
             --admin=1 || true
 
-      - name: 🔌 Start tmate session + Discord notify
+      - name: 🔌 Start tmate + Notify Discord
         run: |
-          echo "🔄 Launching tmate..."
-          sudo apt install -y tmate
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
           SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-          echo "$SSH" > "links/${{ github.event.client_payload.vps_name }}.txt"
-
           PANEL_URL="http://$(curl -s ifconfig.me):8080"
+
+          echo "$SSH" > "links/${{ github.event.client_payload.vps_name }}.txt"
           echo "$PANEL_URL" > "links/${{ github.event.client_payload.vps_name }}_panel.txt"
 
           curl -H "Content-Type: application/json" -X POST \
