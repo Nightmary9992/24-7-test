@@ -40,14 +40,10 @@ jobs:
           docker --version || true
 
       - name: Set Laravel APP_KEY
-        run: echo "APP_KEY=base64:0nYbJe1iR9o0bLJYy7exKgDq+Zoy7Z9Wm8rKpW63g2k=" >> .env
+  run: |
+    APP_KEY="base64:0nYbJe1iR9o0bLJYy7exKgDq+Zoy7Z9Wm8rKpW63g2k="
+    echo "APP_KEY=$APP_KEY" >> .env
 
-      - name: ✅ Ensure APP_KEY secret exists
-        run: |
-          if [ -z "${{ secrets.APP_KEY }}" ]; then
-            echo "ERROR: APP_KEY secret not set. Add a repo secret named APP_KEY with your fixed Laravel key."
-            exit 1
-          fi
 
       - name: 🕸 Create docker network
         run: |
@@ -173,17 +169,20 @@ EOF
           fi
           echo "$PANEL_URL" | tee links/panel_url.txt
 
-      - name: 🔌 Start tmate session and capture SSH
-        run: |
-          # ensure tmate present (installed earlier)
-          if ! command -v tmate >/dev/null 2>&1; then
-            sudo apt-get update && sudo apt-get install -y tmate
-          fi
-          tmate -S /tmp/tmate.sock new-session -d
-          tmate -S /tmp/tmate.sock wait tmate-ready
-          SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-          echo "$SSH" | tee "links/${{ github.event.client_payload.vps_name || 'autovps' }}.txt"
-          echo "SSH:$SSH" >> links/admin_info.txt || true
+- name: 🔌 Start tmate session and capture SSH
+  run: |
+    # ensure tmate present (installed earlier)
+    if ! command -v tmate >/dev/null 2>&1; then
+      sudo apt-get update && sudo apt-get install -y tmate
+    fi
+
+    VPS_NAME="${GITHUB_EVENT_CLIENT_PAYLOAD_VPS_NAME:-autovps}"
+
+    tmate -S /tmp/tmate.sock new-session -d
+    tmate -S /tmp/tmate.sock wait tmate-ready
+    SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
+    echo "$SSH" | tee "links/${VPS_NAME}.txt"
+    echo "SSH:$SSH" >> links/admin_info.txt || true
 
       - name: 💾 Dump MySQL DB (backup)
         run: |
