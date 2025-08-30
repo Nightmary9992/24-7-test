@@ -14,7 +14,7 @@ jobs:
       DISCORD_WEBHOOK: "https://discord.com/api/webhooks/1354349049410490418/XaRlJspNCk8h8QMkY329QVqNOP2BiJ-hx_1MA00EDSNDXFDJxwPAbjReNuKeGfweTA7X"
 
     steps:
-      - name: ⬇️ Checkout (full history)
+      - name: ⬇️ Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -24,16 +24,12 @@ jobs:
           mkdir -p links .backup temp
           chmod 777 links .backup temp
 
-      - name: 🧰 Install helper tools
+      - name: 🧰 Install tools
         run: |
           sudo apt-get update -y
           sudo apt-get install -y unzip jq curl git || true
-          if ! command -v tmate >/dev/null 2>&1; then
-            sudo apt-get install -y tmate || true
-          fi
-          if ! command -v docker >/dev/null 2>&1; then
-            curl -fsSL https://get.docker.com | sh
-          fi
+          if ! command -v tmate >/dev/null 2>&1; then sudo apt-get install -y tmate || true; fi
+          if ! command -v docker >/dev/null 2>&1; then curl -fsSL https://get.docker.com | sh; fi
           docker --version || true
 
       - name: Set Laravel APP_KEY
@@ -41,11 +37,10 @@ jobs:
           APP_KEY="base64:0nYbJe1iR9o0bLJYy7exKgDq+Zoy7Z9Wm8rKpW63g2k="
           echo "APP_KEY=$APP_KEY" >> .env
 
-      - name: 🕸 Create docker network
-        run: |
-          docker network create pteronet || true
+      - name: 🕸 Create Docker network
+        run: docker network create pteronet || true
 
-      - name: 🛢 Start MySQL in Docker
+      - name: 🛢 Start MySQL
         run: |
           docker rm -f pterodactyl_mysql || true
           docker run -d --name pterodactyl_mysql \
@@ -60,9 +55,13 @@ jobs:
             docker exec pterodactyl_mysql mysql -uroot -prootpass -e "SELECT 1;" >/dev/null 2>&1 && break
             sleep 2
           done
-          docker exec pterodactyl_mysql mysql -uroot -prootpass -e "SHOW DATABASES;" || (docker logs pterodactyl_mysql && exit 1)
 
-      - name: 🔧 Start Pterodactyl Panel container
+      - name: 🟢 Start Redis
+        run: |
+          docker rm -f pterodactyl_redis || true
+          docker run -d --name pterodactyl_redis --network pteronet redis:alpine
+
+      - name: 🔧 Start Pterodactyl Panel
         run: |
           docker rm -f pterodactyl || true
           docker volume create pterodactyl_panel_data || true
@@ -74,6 +73,7 @@ jobs:
             -e DB_DATABASE=pterodactyl_db \
             -e DB_USERNAME=ptero \
             -e DB_PASSWORD=pteropass \
+            -e REDIS_HOST=pterodactyl_redis \
             -e APP_KEY="base64:0nYbJe1iR9o0bLJYy7exKgDq+Zoy7Z9Wm8rKpW63g2k=" \
             -v pterodactyl_panel_data:/var/www/pterodactyl \
             ghcr.io/pterodactyl/panel:latest
@@ -93,6 +93,7 @@ jobs:
 
       - name: 👑 Ensure admin user exists
         run: |
+          mkdir -p links
           ADMIN_EMAIL="admin@example.com"
           ADMIN_PASS="AdminPass123"
           docker exec -i pterodactyl php artisan p:user:make \
@@ -105,14 +106,10 @@ jobs:
           echo "EMAIL:$ADMIN_EMAIL" > links/admin_info.txt
           echo "PASS:$ADMIN_PASS" >> links/admin_info.txt
 
-      - name: 🐉 Write Wings config & Start Wings container
+      - name: 🐉 Write Wings config & start container
         run: |
           mkdir -p temp
-
-          # create wings.yml safely
           printf 'panel:\n  url: "http://pterodactyl"\n  token_id: "localtoken"\n  token: "localtoken123"\n  verify_tls: false\napi:\n  host: 0.0.0.0\n  port: 8080\ndocker:\n  network:\n    interface: docker0\n' > temp/wings.yml
-
-          # start Wings container
           docker rm -f pterodactyl_wings || true
           docker run -d --name pterodactyl_wings \
             --privileged \
@@ -124,7 +121,6 @@ jobs:
             ghcr.io/pterodactyl/wings:latest || true
           sleep 8
           docker logs pterodactyl_wings --tail 50 || true
-          docker ps -a -q | xargs -r docker start || true
 
       - name: 🌐 Install & start ngrok
         run: |
@@ -142,9 +138,7 @@ jobs:
 
       - name: 🔌 Start tmate session & capture SSH
         run: |
-          if ! command -v tmate >/dev/null 2>&1; then
-            sudo apt-get update && sudo apt-get install -y tmate
-          fi
+          if ! command -v tmate >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y tmate; fi
           VPS_NAME="${GITHUB_EVENT_CLIENT_PAYLOAD_VPS_NAME:-autovps}"
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
@@ -185,3 +179,12 @@ jobs:
           commit_user_name: "github-actions[bot]"
           commit_user_email: "41898282+github-actions[bot]@users.noreply.github.com"
           push_options: '--force-with-lease'
+
+      - name: 🔁 Auto-trigger next VPS
+        if: ${{ github.event_name != 'repository_dispatch' }}
+        run: |
+          curl -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            https://api.github.com/repos/${{ github.repository }}/dispatches \
+            -d '{"event_type":"create-vps", "client_payload": {"VPS_NAME": "autovps"}}'
