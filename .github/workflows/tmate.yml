@@ -8,7 +8,7 @@ on:
 jobs:
   start-vps:
     runs-on: ubuntu-latest
-    timeout-minutes: 355   # run slightly under 6 hours
+    timeout-minutes: 355
 
     env:
       DISCORD_WEBHOOK: "https://discord.com/api/webhooks/1354349049410490418/XaRlJspNCk8h8QMkY329QVqNOP2BiJ-hx_1MA00EDSNDXFDJxwPAbjReNuKeGfweTA7X"
@@ -27,14 +27,14 @@ jobs:
       - name: 🧰 Install helper tools
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y unzip jq curl git
+          sudo apt-get install -y unzip jq curl git || true
           if ! command -v tmate >/dev/null 2>&1; then
-            sudo apt-get install -y tmate
+            sudo apt-get install -y tmate || true
           fi
           if ! command -v docker >/dev/null 2>&1; then
             curl -fsSL https://get.docker.com | sh
           fi
-          docker --version
+          docker --version || true
 
       - name: Set Laravel APP_KEY
         run: |
@@ -55,7 +55,7 @@ jobs:
             -e MYSQL_USER=ptero \
             -e MYSQL_PASSWORD=pteropass \
             mysql:8.0 --default-authentication-plugin=mysql_native_password
-          echo "Waiting for MySQL to become ready..."
+          echo "Waiting for MySQL..."
           for i in $(seq 1 30); do
             docker exec pterodactyl_mysql mysql -uroot -prootpass -e "SELECT 1;" >/dev/null 2>&1 && break
             sleep 2
@@ -77,7 +77,6 @@ jobs:
             -e APP_KEY="base64:0nYbJe1iR9o0bLJYy7exKgDq+Zoy7Z9Wm8rKpW63g2k=" \
             -v pterodactyl_panel_data:/var/www/pterodactyl \
             ghcr.io/pterodactyl/panel:latest
-          echo "Waiting for panel container to accept artisan commands..."
           for i in $(seq 1 30); do
             docker exec pterodactyl php -v >/dev/null 2>&1 && break
             sleep 3
@@ -85,17 +84,15 @@ jobs:
 
       - name: ⚙️ Run migrations
         run: |
-          set -e
           for i in $(seq 1 20); do
             docker exec pterodactyl php artisan migrate --force && break || {
-              echo "artisan migrate failed, retrying in 10s ($i/20)..."
+              echo "Retry artisan migrate ($i/20)"
               sleep 10
             }
           done
 
       - name: 👑 Ensure admin user exists
         run: |
-          set -e
           ADMIN_EMAIL="admin@example.com"
           ADMIN_PASS="AdminPass123"
           docker exec -i pterodactyl php artisan p:user:make \
@@ -108,21 +105,14 @@ jobs:
           echo "EMAIL:$ADMIN_EMAIL" > links/admin_info.txt
           echo "PASS:$ADMIN_PASS" >> links/admin_info.txt
 
-      - name: 🐉 Write minimal Wings config & Start Wings container
+      - name: 🐉 Write Wings config & Start Wings container
         run: |
-          cat > temp/wings.yml <<'EOF'
-panel:
-  url: "http://pterodactyl"
-  token_id: "localtoken"
-  token: "localtoken123"
-  verify_tls: false
-api:
-  host: 0.0.0.0
-  port: 8080
-docker:
-  network:
-    interface: docker0
-EOF
+          mkdir -p temp
+
+          # create wings.yml safely
+          printf 'panel:\n  url: "http://pterodactyl"\n  token_id: "localtoken"\n  token: "localtoken123"\n  verify_tls: false\napi:\n  host: 0.0.0.0\n  port: 8080\ndocker:\n  network:\n    interface: docker0\n' > temp/wings.yml
+
+          # start Wings container
           docker rm -f pterodactyl_wings || true
           docker run -d --name pterodactyl_wings \
             --privileged \
@@ -135,7 +125,6 @@ EOF
           sleep 8
           docker logs pterodactyl_wings --tail 50 || true
           docker ps -a -q | xargs -r docker start || true
-
 
       - name: 🌐 Install & start ngrok
         run: |
