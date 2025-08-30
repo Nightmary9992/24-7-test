@@ -114,11 +114,14 @@ jobs:
           name="${{ github.event.client_payload.vps_name || 'autovps' }}"
           zip -r ".backup/$name.zip" * .git/** ".github/**" ".backup/**" || true
 
-      - name: ⬆️ Push
+      - name: 🔄 Commit & Push changes
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "🔄 Updated SSH + backup for ${{ github.event.client_payload.vps_name || 'autovps' }}"
-          file_pattern: 'links/*.txt .backup/*.zip'
+          commit_message: "🔄 Updated SSH + backup for autovps"
+          file_pattern: links/*.txt .backup/*.zip
+          commit_user_name: github-actions[bot]
+          commit_user_email: 41898282+github-actions[bot]@users.noreply.github.com
+          push_options: '--force-with-lease'
 
       - name: 🔁 Re-trigger workflow
         if: always()
