@@ -17,7 +17,7 @@ jobs:
       - name: 📂 Prepare dirs
         run: mkdir -p links .backup
 
-      - name: 🐳 Install Docker & deps
+      - name: 🐳 Ensure Docker & deps
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -32,10 +32,9 @@ jobs:
             mysql-client \
             tmate
 
-          # Install Docker via official convenience script (avoids conflicts)
-          curl -fsSL https://get.docker.com | sh
-          sudo usermod -aG docker $USER
-          docker --version
+          # GitHub runners already have Docker installed
+          docker --version || true
+          docker ps || true
 
 
       - name: 🛢️ Start MySQL in Docker
