@@ -21,12 +21,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            ca-certificates curl gnupg lsb-release unzip jq \
-            php php-cli tmate
+            ca-certificates \
+            curl \
+            gnupg \
+            lsb-release \
+            unzip \
+            jq \
+            php \
+            php-cli \
+            mysql-client \
+            tmate
 
-          # Install docker (from ubuntu repo, stable)
-          sudo apt-get install -y docker.io
+          # Install Docker via official convenience script (avoids conflicts)
+          curl -fsSL https://get.docker.com | sh
+          sudo usermod -aG docker $USER
           docker --version
+
 
       - name: 🛢️ Start MySQL in Docker
         run: |
