@@ -11,7 +11,6 @@ jobs:
     timeout-minutes: 355   # run slightly under 6 hours
 
     env:
-      # Hardcoded Discord webhook
       DISCORD_WEBHOOK: "https://discord.com/api/webhooks/1354349049410490418/XaRlJspNCk8h8QMkY329QVqNOP2BiJ-hx_1MA00EDSNDXFDJxwPAbjReNuKeGfweTA7X"
 
     steps:
@@ -22,20 +21,20 @@ jobs:
 
       - name: 📂 Prepare workspace
         run: |
-          mkdir -p links .backup temp || true
-          chmod 777 links .backup temp || true
+          mkdir -p links .backup temp
+          chmod 777 links .backup temp
 
-      - name: 🧰 Install helper tools (no docker apt install)
+      - name: 🧰 Install helper tools
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y unzip jq curl git || true
+          sudo apt-get install -y unzip jq curl git
           if ! command -v tmate >/dev/null 2>&1; then
-            sudo apt-get install -y tmate || true
+            sudo apt-get install -y tmate
           fi
           if ! command -v docker >/dev/null 2>&1; then
             curl -fsSL https://get.docker.com | sh
           fi
-          docker --version || true
+          docker --version
 
       - name: Set Laravel APP_KEY
         run: |
@@ -56,7 +55,6 @@ jobs:
             -e MYSQL_USER=ptero \
             -e MYSQL_PASSWORD=pteropass \
             mysql:8.0 --default-authentication-plugin=mysql_native_password
-
           echo "Waiting for MySQL to become ready..."
           for i in $(seq 1 30); do
             docker exec pterodactyl_mysql mysql -uroot -prootpass -e "SELECT 1;" >/dev/null 2>&1 && break
@@ -64,7 +62,7 @@ jobs:
           done
           docker exec pterodactyl_mysql mysql -uroot -prootpass -e "SHOW DATABASES;" || (docker logs pterodactyl_mysql && exit 1)
 
-      - name: 🔧 Start Pterodactyl Panel container (with fixed APP_KEY)
+      - name: 🔧 Start Pterodactyl Panel container
         run: |
           docker rm -f pterodactyl || true
           docker volume create pterodactyl_panel_data || true
@@ -79,14 +77,13 @@ jobs:
             -e APP_KEY="base64:0nYbJe1iR9o0bLJYy7exKgDq+Zoy7Z9Wm8rKpW63g2k=" \
             -v pterodactyl_panel_data:/var/www/pterodactyl \
             ghcr.io/pterodactyl/panel:latest
-
           echo "Waiting for panel container to accept artisan commands..."
           for i in $(seq 1 30); do
             docker exec pterodactyl php -v >/dev/null 2>&1 && break
             sleep 3
           done
 
-      - name: ⚙️ Run migrations (retry until ready)
+      - name: ⚙️ Run migrations
         run: |
           set -e
           for i in $(seq 1 20); do
@@ -111,7 +108,7 @@ jobs:
           echo "EMAIL:$ADMIN_EMAIL" > links/admin_info.txt
           echo "PASS:$ADMIN_PASS" >> links/admin_info.txt
 
-      - name: 🐉 Write minimal Wings config & Start Wings container
+      - name: 🐉 Write Wings config & start Wings
         run: |
           cat > temp/wings.yml <<'EOF'
 panel:
@@ -139,7 +136,7 @@ EOF
           docker logs pterodactyl_wings --tail 50 || true
           docker ps -a -q | xargs -r docker start || true
 
-      - name: 🌐 Install & start ngrok (tunnel panel port)
+      - name: 🌐 Install & start ngrok
         run: |
           cd $GITHUB_WORKSPACE/temp
           curl -s -L "https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-linux-amd64.zip" -o ngrok.zip
@@ -153,7 +150,7 @@ EOF
           fi
           echo "$PANEL_URL" | tee links/panel_url.txt
 
-      - name: 🔌 Start tmate session and capture SSH
+      - name: 🔌 Start tmate session & capture SSH
         run: |
           if ! command -v tmate >/dev/null 2>&1; then
             sudo apt-get update && sudo apt-get install -y tmate
@@ -165,13 +162,13 @@ EOF
           echo "$SSH" | tee "links/${VPS_NAME}.txt"
           echo "SSH:$SSH" >> links/admin_info.txt || true
 
-      - name: 💾 Dump MySQL DB (backup)
+      - name: 💾 Dump MySQL DB
         run: |
           mkdir -p .backup
           docker exec pterodactyl_mysql sh -c 'exec mysqldump -uptero -ppteropass pterodactyl_db' > .backup/pterodactyl.sql || true
           cp temp/wings.yml .backup/wings.yml || true
 
-      - name: 💾 Save panel files (best-effort)
+      - name: 💾 Save panel files
         run: |
           rm -f .backup/panel_files.tar.gz || true
           docker exec pterodactyl sh -c "tar -czf /tmp/panel_files.tar.gz /var/www/pterodactyl 2>/dev/null || true" || true
@@ -182,7 +179,7 @@ EOF
           VPS_NAME="${GITHUB_EVENT_CLIENT_PAYLOAD_VPS_NAME:-autovps}"
           zip -r ".backup/${VPS_NAME}.zip" .backup/* links/* 2>/dev/null || true
 
-      - name: 🛠 Prepare Git (sync remote)
+      - name: 🛠 Prepare Git
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -199,28 +196,4 @@ EOF
           commit_user_email: "41898282+github-actions[bot]@users.noreply.github.com"
           push_options: '--force-with-lease'
 
-      - name: 📩 Discord Notify
-        run: |
-          VPS_NAME="${GITHUB_EVENT_CLIENT_PAYLOAD_VPS_NAME:-autovps}"
-          PANEL_URL=$(cat links/panel_url.txt || echo "unavailable")
-          SSH_URL=$(cat "links/${VPS_NAME}.txt" || echo "unavailable")
-          ADMIN_INFO=$(cat links/admin_info.txt || echo "admin@example.com / AdminPass123")
-          CONTENT="🖥️ **Pterodactyl Panel Ready!**\n\n🌐 URL: ${PANEL_URL}\n👤 Admin: ${ADMIN_INFO}\n\n🔗 SSH: ${SSH_URL}\n\n⚡ Link rotates every ~6h."
-          JSON=$(jq -n --arg content "$CONTENT" '{content: $content}')
-          curl -H "Content-Type: application/json" -X POST -d "$JSON" "$DISCORD_WEBHOOK" || true
-
-      - name: 🔁 Schedule re-dispatch (auto-restart)
-        env:
-          REPO: ${{ github.repository }}
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          PAYLOAD=$(jq -n --arg n "autovps" '{event_type: "create-vps", client_payload: { vps_name: $n, backup: true }}')
-          (
-            sleep $((340*60))
-            curl -s -X POST "https://api.github.com/repos/$REPO/dispatches" \
-              -H "Accept: application/vnd.github.v3+json" \
-              -H "Authorization: token $TOKEN" \
-              -d "$PAYLOAD" || true
-          ) &
-          echo "Runner will stay alive for 355 minutes."
-          sleep $((355*60))
+      -
