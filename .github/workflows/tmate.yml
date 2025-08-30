@@ -39,6 +39,9 @@ jobs:
           fi
           docker --version || true
 
+      - name: Set Laravel APP_KEY
+        run: echo "APP_KEY=base64:0nYbJe1iR9o0bLJYy7exKgDq+Zoy7Z9Wm8rKpW63g2k=" >> .env
+
       - name: ✅ Ensure APP_KEY secret exists
         run: |
           if [ -z "${{ secrets.APP_KEY }}" ]; then
