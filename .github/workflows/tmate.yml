@@ -20,24 +20,24 @@ jobs:
       - name: 🧰 Install base packages
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y zip unzip curl jq git tar sed coreutils
-          sudo apt-get install -y mariadb-server mariadb-client redis-server nginx
-          sudo apt-get install -y php php-fpm php-cli php-mbstring php-xml php-curl php-zip php-gd php-mysql
-          sudo apt-get install -y composer docker.io screen
+          sudo apt-get install -y zip unzip curl jq git tar sed coreutils \
+            mariadb-server mariadb-client redis-server nginx \
+            php php-fpm php-cli php-mbstring php-xml php-curl php-zip php-gd php-mysql \
+            composer docker.io screen tmate
 
       - name: 📦 Restore repo backup (files)
         run: |
           name="${{ github.event.client_payload.vps_name }}"
           if [ "${{ github.event.client_payload.backup }}" = "true" ] && [ -f ".backup/$name.zip" ]; then
             echo "🔄 Restoring backup archive .backup/$name.zip"
-            unzip -o ".backup/$name.zip" -d . || echo "⚠️ No backup zip to restore."
+            unzip -o ".backup/$name.zip" -d . || echo "⚠️ unzip failed or archive missing"
           else
             echo "ℹ️ No file backup restore requested or not found."
           fi
 
       - name: 🗄 Restore Database (if available)
         run: |
-          sudo systemctl start mariadb
+          sudo systemctl enable --now mariadb redis-server || true
           if [ -f ".backup/pterodactyl.sql" ]; then
             echo "🔄 Restoring MariaDB database from .backup/pterodactyl.sql"
             mysql -u root -e "CREATE DATABASE IF NOT EXISTS pterodactyl;"
@@ -55,89 +55,99 @@ jobs:
             echo "⬇️ Downloading Panel"
             curl -Lo panel.tar.gz https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz
             tar -xzf panel.tar.gz
-            composer install --no-dev --optimize-autoloader
+            composer install --no-dev --optimize-autoloader || true
+          else
+            echo "ℹ️ Panel already present, skipping download."
           fi
           php -r "file_exists('storage') || mkdir('storage');"
           php -r "file_exists('bootstrap/cache') || mkdir('bootstrap/cache', 0775, true);"
-          sudo chown -R www-data:www-data /var/www/pterodactyl
+          sudo chown -R www-data:www-data /var/www/pterodactyl || true
 
-      - name: ⚙️ Configure Panel (.env, DB, Nginx, PHP-FPM)
+      - name: ⚙️ Configure Panel (.env, DB & migrations)
         run: |
           set -e
           cd /var/www/pterodactyl
-          # .env if missing
           if [ ! -f ".env" ]; then
             cp .env.example .env
           fi
-          # DB & credentials
-          sudo systemctl enable --now mariadb redis-server
-          mysql -u root -e "CREATE DATABASE IF NOT EXISTS pterodactyl;"
-          mysql -u root -e "CREATE USER IF NOT EXISTS 'ptero'@'127.0.0.1' IDENTIFIED BY 'password';"
-          mysql -u root -e "GRANT ALL PRIVILEGES ON pterodactyl.* TO 'ptero'@'127.0.0.1';"
-          mysql -u root -e "FLUSH PRIVILEGES;"
-          sed -i 's,^DB_CONNECTION=.*$,DB_CONNECTION=mysql,' .env
-          sed -i 's,^DB_HOST=.*$,DB_HOST=127.0.0.1,' .env
-          sed -i 's,^DB_PORT=.*$,DB_PORT=3306,' .env
-          sed -i 's,^DB_DATABASE=.*$,DB_DATABASE=pterodactyl,' .env
-          sed -i 's,^DB_USERNAME=.*$,DB_USERNAME=ptero,' .env
-          sed -i 's,^DB_PASSWORD=.*$,DB_PASSWORD=password,' .env
-          # App key & migrations (only if DB empty)
+          # ensure DB user and DB exist
+          sudo systemctl enable --now mariadb || true
+          mysql -u root -e "CREATE DATABASE IF NOT EXISTS pterodactyl;" || true
+          mysql -u root -e "CREATE USER IF NOT EXISTS 'ptero'@'127.0.0.1' IDENTIFIED BY 'password';" || true
+          mysql -u root -e "GRANT ALL PRIVILEGES ON pterodactyl.* TO 'ptero'@'127.0.0.1';" || true
+          mysql -u root -e "FLUSH PRIVILEGES;" || true
+          # write DB vars into .env
+          sed -i 's/^DB_CONNECTION=.*/DB_CONNECTION=mysql/' .env
+          sed -i 's/^DB_HOST=.*/DB_HOST=127.0.0.1/' .env
+          sed -i 's/^DB_PORT=.*/DB_PORT=3306/' .env
+          sed -i 's/^DB_DATABASE=.*/DB_DATABASE=pterodactyl/' .env
+          sed -i 's/^DB_USERNAME=.*/DB_USERNAME=ptero/' .env
+          sed -i 's/^DB_PASSWORD=.*/DB_PASSWORD=password/' .env
+          # app key & migrate if DB empty
           php artisan key:generate --force || true
-          COUNT=$(mysql -u root -Nse "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='pterodactyl';")
-          if [ "$COUNT" -eq 0 ]; then
-            php artisan migrate --seed --force
+          TABLE_COUNT=$(mysql -u root -Nse "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='pterodactyl';" 2>/dev/null || echo 0)
+          if [ "$TABLE_COUNT" -eq 0 ]; then
+            php artisan migrate --seed --force || true
           else
             echo "✅ DB already initialized; skipping migrate/seed."
           fi
-          # Nginx vhost
-          PHP_FPM_SOCK=$(ls /run/php/php*-fpm.sock | head -n1)
-          sudo tee /etc/nginx/sites-available/pterodactyl >/dev/null <<'NGINX'
-          server {
-              listen 80 default_server;
-              listen [::]:80 default_server;
-              server_name _;
-              root /var/www/pterodactyl/public;
-              index index.php;
+          # Setup nginx vhost (detect php-fpm socket)
+          PHP_FPM_SOCK=$(ls /run/php/php*-fpm.sock 2>/dev/null | head -n1 || true)
+          if [ -z "$PHP_FPM_SOCK" ]; then
+            FASTCGI_PASS="127.0.0.1:9000"
+          else
+            FASTCGI_PASS="unix:$PHP_FPM_SOCK"
+          fi
+          sudo tee /etc/nginx/sites-available/pterodactyl > /dev/null <<EOF
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    root /var/www/pterodactyl/public;
+    index index.php;
 
-              location / {
-                  try_files $uri $uri/ /index.php?$query_string;
-              }
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
 
-              location ~ \.php$ {
-                  include snippets/fastcgi-php.conf;
-                  fastcgi_pass unix:PHP_FPM_SOCK;
-              }
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass ${FASTCGI_PASS};
+    }
 
-              location ~ /\.ht {
-                  deny all;
-              }
-          }
-NGINX
-          sudo sed -i "s#PHP_FPM_SOCK#$PHP_FPM_SOCK#g" /etc/nginx/sites-available/pterodactyl
-          sudo rm -f /etc/nginx/sites-enabled/default
+    location ~ /\.ht {
+        deny all;
+    }
+}
+EOF
+          sudo rm -f /etc/nginx/sites-enabled/default || true
           sudo ln -sf /etc/nginx/sites-available/pterodactyl /etc/nginx/sites-enabled/pterodactyl
-          sudo systemctl enable --now php*-fpm || true
-          sudo nginx -t && sudo systemctl restart nginx
+          sudo systemctl restart php*-fpm || true
+          sudo nginx -t && sudo systemctl restart nginx || true
 
       - name: 🌐 Start ngrok & set APP_URL
         run: |
           cd $GITHUB_WORKSPACE
-          curl -s https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-linux-amd64.zip -o ngrok.zip
-          unzip -o ngrok.zip
-          ./ngrok http 80 > /dev/null &
+          curl -s -L "https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-linux-amd64.zip" -o ngrok.zip
+          unzip -o ngrok.zip >/dev/null || true
+          chmod +x ngrok || true
+          nohup ./ngrok http 80 >/dev/null 2>&1 &
           sleep 5
-          PANEL_URL=$(curl --silent http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[0].public_url')
+          PANEL_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[0].public_url' || echo "http://127.0.0.1")
           echo "$PANEL_URL" | tee links/panel_url.txt
-          # Update APP_URL to current public URL
-          sed -i "s,^APP_URL=.*$,APP_URL=$PANEL_URL," /var/www/pterodactyl/.env
-          (cd /var/www/pterodactyl && php artisan config:clear)
+          # Update APP_URL in panel .env
+          if [ -f "/var/www/pterodactyl/.env" ]; then
+            sed -i "s|^APP_URL=.*|APP_URL=${PANEL_URL}|" /var/www/pterodactyl/.env || true
+            (cd /var/www/pterodactyl && php artisan config:clear) || true
+          fi
 
       - name: 👤 Ensure Admin User Exists (same across cycles)
         run: |
-          cd /var/www/pterodactyl
+          cd /var/www/pterodactyl || exit 0
           ADMIN_EMAIL="admin@ptero.local"
           ADMIN_PASS="SuperSecret123"
-          COUNT=$(mysql -u root -Nse "SELECT COUNT(*) FROM pterodactyl.users WHERE root_admin = 1;")
+          # If migrations created DB tables, check for admin row; otherwise create admin
+          COUNT=$(mysql -u root -Nse "SELECT COUNT(*) FROM pterodactyl.users WHERE root_admin = 1;" 2>/dev/null || echo 0)
           if [ "$COUNT" -eq 0 ]; then
             echo "⚙️ Creating admin user..."
             php artisan p:user:make --admin \
@@ -145,38 +155,34 @@ NGINX
               --username="admin" \
               --name-first="Auto" \
               --name-last="Admin" \
-              --password="$ADMIN_PASS" > $GITHUB_WORKSPACE/links/admin_user.txt
+              --password="$ADMIN_PASS" > $GITHUB_WORKSPACE/links/admin_user.txt || true
           else
             echo "✅ Admin exists, skipping creation."
-            echo "Email: $ADMIN_EMAIL | Password: $ADMIN_PASS" > $GITHUB_WORKSPACE/links/admin_user.txt
+            echo "Email: $ADMIN_EMAIL" > $GITHUB_WORKSPACE/links/admin_user.txt
+            echo "Password: $ADMIN_PASS" >> $GITHUB_WORKSPACE/links/admin_user.txt
           fi
 
-      - name: 🐉 Install & Start Wings (Node)
+      - name: 🐉 Install & Start Wings (Node) and start servers
         run: |
           sudo mkdir -p /etc/pterodactyl
-          # Restore saved wings config if present
+          # restore wings config if present
           if [ -f ".backup/wings.yml" ]; then
-            echo "🔄 Restoring Wings config..."
-            sudo cp .backup/wings.yml /etc/pterodactyl/config.yml
+            sudo cp .backup/wings.yml /etc/pterodactyl/config.yml || true
           fi
-          # Download wings binary if missing
-          if ! command -v wings >/dev/null 2>&1; then
+          # download wings binary if missing
+          if [ ! -x /usr/local/bin/wings ]; then
             curl -Lo wings https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_amd64
             sudo mv wings /usr/local/bin/wings
             sudo chmod +x /usr/local/bin/wings
           fi
-          # Ensure Docker is running
-          sudo systemctl enable --now docker
-          # Update panel URL inside wings config (if it exists)
-          if [ -f "/etc/pterodactyl/config.yml" ]; then
-            PANEL_URL=$(cat links/panel_url.txt)
-            sudo sed -i "s#^\\s*url: .*#  url: \"$PANEL_URL\"#g" /etc/pterodactyl/config.yml || true
-          else
-            # Minimal dummy config (replace later from Panel for full functionality)
-            PANEL_URL=$(cat links/panel_url.txt)
-            sudo tee /etc/pterodactyl/config.yml >/dev/null <<EOF
+          # ensure docker is running
+          sudo systemctl enable --now docker || true
+          # write minimal wings config that points to this panel URL (if not present)
+          PANEL_URL=$(cat links/panel_url.txt || echo "http://127.0.0.1")
+          if [ ! -f /etc/pterodactyl/config.yml ]; then
+            sudo tee /etc/pterodactyl/config.yml > /dev/null <<EOF
 panel:
-  url: "$PANEL_URL"
+  url: "${PANEL_URL}"
   token_id: "localtoken"
   token: "localtoken123"
   verify_tls: false
@@ -187,33 +193,36 @@ docker:
   network:
     interface: docker0
 EOF
+          else
+            # try to update panel.url in existing config (best-effort)
+            sudo sed -i "s#^\s*url:.*#  url: \"${PANEL_URL}\"#g" /etc/pterodactyl/config.yml || true
           fi
-          # Start Wings in background
-          screen -dmS wings bash -c "sudo wings --config /etc/pterodactyl/config.yml"
-          # Start any existing containers
-          sudo docker ps -a -q | xargs -r sudo docker start
+          # start wings inside a screen session so it runs in background
+          screen -dmS wings bash -c "sudo /usr/local/bin/wings --config /etc/pterodactyl/config.yml > $GITHUB_WORKSPACE/wings.log 2>&1"
+          sleep 2
+          # restart any docker containers (servers)
+          sudo docker ps -a -q | xargs -r sudo docker start || true
 
-      - name: 🔌 Start tmate session
+      - name: 🔌 Start tmate session (SSH)
         run: |
           echo "🔄 Launching tmate..."
-          sudo apt-get install -y tmate
+          # ensure tmate installed by apt earlier
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
-          SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-          echo "$SSH" | tee "links/${{ github.event.client_payload.vps_name }}.txt"
-          echo "✅ SSH Ready: $SSH"
+          SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' 2>/dev/null || true)
+          echo "${SSH}" | tee "links/${{ github.event.client_payload.vps_name }}.txt"
+          echo "✅ SSH Ready: ${SSH}"
 
       - name: 💾 Save Database Backup
         run: |
-          echo "📦 Exporting MariaDB database..."
-          mysqldump -u root pterodactyl > .backup/pterodactyl.sql || true
+          mkdir -p $GITHUB_WORKSPACE/.backup
+          mysqldump -u root pterodactyl > $GITHUB_WORKSPACE/.backup/pterodactyl.sql || true
 
       - name: 💾 Save Panel + Wings backups
         run: |
           name="${{ github.event.client_payload.vps_name }}"
-          # Save wings config into .backup so it persists
-          sudo cp /etc/pterodactyl/config.yml .backup/wings.yml || true
-          zip -r ".backup/$name.zip" * .git/** ".github/**" ".backup/**" /var/www/pterodactyl 2>/dev/null || true
+          sudo cp /etc/pterodactyl/config.yml .backup/wings.yml 2>/dev/null || true
+          zip -r ".backup/$name.zip" . -x ".git/*" 2>/dev/null || true
 
       - name: ⬆️ Push updates (SSH, URLs, backups)
         uses: stefanzweifel/git-auto-commit-action@v5
@@ -226,18 +235,25 @@ EOF
         run: |
           ADMIN_EMAIL="admin@ptero.local"
           ADMIN_PASS="SuperSecret123"
-          PANEL_URL=$(cat links/panel_url.txt)
+          PANEL_URL=$(cat links/panel_url.txt || echo "unavailable")
           SSH_URL=$(cat "links/${{ github.event.client_payload.vps_name }}.txt" || echo "unavailable")
           printf -v CONTENT "🖥️ **Pterodactyl Panel Ready!**\n\n🌐 URL: %s\n👤 Email: %s\n🔑 Password: %s\n\n🔗 SSH: %s\n\n⚡ Link rotates every ~6h." "$PANEL_URL" "$ADMIN_EMAIL" "$ADMIN_PASS" "$SSH_URL"
           JSON=$(jq -n --arg content "$CONTENT" '{content: $content}')
-          curl -H "Content-Type: application/json" -X POST -d "$JSON" "https://discord.com/api/webhooks/1354349049410490418/XaRlJspNCk8h8QMkY329QVqNOP2BiJ-hx_1MA00EDSNDXFDJxwPAbjReNuKeGfweTA7X"
+          # WARNING: webhook is hardcoded per your request. Consider moving to a secret.
+          curl -H "Content-Type: application/json" -X POST -d "$JSON" "https://discord.com/api/webhooks/1354349049410490418/XaRlJspNCk8h8QMkY329QVqNOP2BiJ-hx_1MA00EDSNDXFDJxwPAbjReNuKeGfweTA7X" || true
 
-      - name: ⏳ Keep alive + schedule auto re-trigger
+      - name: ⏳ Schedule re-dispatch and keep alive
         run: |
-          echo "⏱ Scheduling re-dispatch at ~340 minutes..."
-          bash -lc 'sleep $((340*60)); curl -X POST https://api.github.com/repos/${{ github.repository }}/dispatches \
-            -H "Accept: application/vnd.github.v3+json" \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -d "{ \"event_type\": \"create-vps\", \"client_payload\": { \"vps_name\": \"autovps\", \"backup\": true }}"' &
+          REPO="${{ github.repository }}"
+          TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          PAYLOAD=$(jq -n --arg v "autovps" '{event_type: "create-vps", client_payload: { vps_name: $v, backup: true }}')
+          (
+            # wait ~340 minutes then trigger a repository_dispatch to re-run (before 6h cap)
+            sleep $((340*60))
+            curl -s -X POST "https://api.github.com/repos/$REPO/dispatches" \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "Authorization: token $TOKEN" \
+              -d "$PAYLOAD" || true
+          ) &
           echo "🕒 Keeping runner alive for 355 minutes..."
           sleep $((355*60))
