@@ -108,7 +108,7 @@ jobs:
           echo "EMAIL:$ADMIN_EMAIL" > links/admin_info.txt
           echo "PASS:$ADMIN_PASS" >> links/admin_info.txt
 
-      - name: 🐉 Write Wings config & start Wings
+      - name: 🐉 Write minimal Wings config & Start Wings container
         run: |
           cat > temp/wings.yml <<'EOF'
 panel:
@@ -135,6 +135,7 @@ EOF
           sleep 8
           docker logs pterodactyl_wings --tail 50 || true
           docker ps -a -q | xargs -r docker start || true
+
 
       - name: 🌐 Install & start ngrok
         run: |
