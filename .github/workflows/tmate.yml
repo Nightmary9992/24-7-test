@@ -11,7 +11,7 @@ jobs:
     timeout-minutes: 355   # run slightly under 6 hours
 
     env:
-      # Hardcoded Discord webhook (per your request)
+      # Hardcoded Discord webhook
       DISCORD_WEBHOOK: "https://discord.com/api/webhooks/1354349049410490418/XaRlJspNCk8h8QMkY329QVqNOP2BiJ-hx_1MA00EDSNDXFDJxwPAbjReNuKeGfweTA7X"
 
     steps:
@@ -29,21 +29,18 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y unzip jq curl git || true
-          # only install tmate if missing
           if ! command -v tmate >/dev/null 2>&1; then
             sudo apt-get install -y tmate || true
           fi
-          # docker is usually preinstalled on runners; if missing, try convenience script
           if ! command -v docker >/dev/null 2>&1; then
             curl -fsSL https://get.docker.com | sh
           fi
           docker --version || true
 
       - name: Set Laravel APP_KEY
-  run: |
-    APP_KEY="base64:0nYbJe1iR9o0bLJYy7exKgDq+Zoy7Z9Wm8rKpW63g2k="
-    echo "APP_KEY=$APP_KEY" >> .env
-
+        run: |
+          APP_KEY="base64:0nYbJe1iR9o0bLJYy7exKgDq+Zoy7Z9Wm8rKpW63g2k="
+          echo "APP_KEY=$APP_KEY" >> .env
 
       - name: 🕸 Create docker network
         run: |
@@ -51,7 +48,6 @@ jobs:
 
       - name: 🛢 Start MySQL in Docker
         run: |
-          # run MySQL (use mysql:8) with native auth set by image args
           docker rm -f pterodactyl_mysql || true
           docker run -d --name pterodactyl_mysql \
             --network pteronet \
@@ -69,12 +65,9 @@ jobs:
           docker exec pterodactyl_mysql mysql -uroot -prootpass -e "SHOW DATABASES;" || (docker logs pterodactyl_mysql && exit 1)
 
       - name: 🔧 Start Pterodactyl Panel container (with fixed APP_KEY)
-        env:
-          APP_KEY: ${{ secrets.APP_KEY }}
         run: |
           docker rm -f pterodactyl || true
           docker volume create pterodactyl_panel_data || true
-
           docker run -d --name pterodactyl \
             --network pteronet \
             -p 8080:80 \
@@ -83,7 +76,7 @@ jobs:
             -e DB_DATABASE=pterodactyl_db \
             -e DB_USERNAME=ptero \
             -e DB_PASSWORD=pteropass \
-            -e APP_KEY="$APP_KEY" \
+            -e APP_KEY="base64:0nYbJe1iR9o0bLJYy7exKgDq+Zoy7Z9Wm8rKpW63g2k=" \
             -v pterodactyl_panel_data:/var/www/pterodactyl \
             ghcr.io/pterodactyl/panel:latest
 
@@ -96,7 +89,6 @@ jobs:
       - name: ⚙️ Run migrations (retry until ready)
         run: |
           set -e
-          # attempt migrations inside the panel container
           for i in $(seq 1 20); do
             docker exec pterodactyl php artisan migrate --force && break || {
               echo "artisan migrate failed, retrying in 10s ($i/20)..."
@@ -104,12 +96,11 @@ jobs:
             }
           done
 
-      - name: 👑 Ensure admin user exists (same account across runs)
+      - name: 👑 Ensure admin user exists
         run: |
           set -e
           ADMIN_EMAIL="admin@example.com"
           ADMIN_PASS="AdminPass123"
-          # create admin user (artisan will error if user exists — that's okay)
           docker exec -i pterodactyl php artisan p:user:make \
             --email="$ADMIN_EMAIL" \
             --username="admin" \
@@ -117,13 +108,11 @@ jobs:
             --name-last="Admin" \
             --password="$ADMIN_PASS" \
             --admin=1 || true
-          # save admin info to links for convenience
           echo "EMAIL:$ADMIN_EMAIL" > links/admin_info.txt
           echo "PASS:$ADMIN_PASS" >> links/admin_info.txt
 
       - name: 🐉 Write minimal Wings config & Start Wings container
         run: |
-          # create a simple wings config pointing to the panel container on docker network
           cat > temp/wings.yml <<'EOF'
 panel:
   url: "http://pterodactyl"
@@ -137,7 +126,6 @@ docker:
   network:
     interface: docker0
 EOF
-          # persist the wings config into backup later
           docker rm -f pterodactyl_wings || true
           docker run -d --name pterodactyl_wings \
             --privileged \
@@ -147,10 +135,8 @@ EOF
             -v /var/lib/pterodactyl:/var/lib/pterodactyl:rw \
             -v $PWD/temp/wings.yml:/etc/pterodactyl/config.yml \
             ghcr.io/pterodactyl/wings:latest || true
-          # give wings a few seconds to start
           sleep 8
           docker logs pterodactyl_wings --tail 50 || true
-          # attempt to start any existing containers (best-effort)
           docker ps -a -q | xargs -r docker start || true
 
       - name: 🌐 Install & start ngrok (tunnel panel port)
@@ -161,50 +147,42 @@ EOF
           chmod +x ngrok || true
           nohup ./ngrok http 8080 >/dev/null 2>&1 &
           sleep 6
-          # get ngrok public url
           PANEL_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[0].public_url' || echo "")
           if [ -z "$PANEL_URL" ] || [ "$PANEL_URL" == "null" ]; then
-            # fallback to instance public IP (may not always be reachable)
             PANEL_URL="http://$(curl -s ifconfig.me | tr -d '\n'):8080"
           fi
           echo "$PANEL_URL" | tee links/panel_url.txt
 
-- name: 🔌 Start tmate session and capture SSH
-  run: |
-    # ensure tmate present (installed earlier)
-    if ! command -v tmate >/dev/null 2>&1; then
-      sudo apt-get update && sudo apt-get install -y tmate
-    fi
-
-    VPS_NAME="${GITHUB_EVENT_CLIENT_PAYLOAD_VPS_NAME:-autovps}"
-
-    tmate -S /tmp/tmate.sock new-session -d
-    tmate -S /tmp/tmate.sock wait tmate-ready
-    SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-    echo "$SSH" | tee "links/${VPS_NAME}.txt"
-    echo "SSH:$SSH" >> links/admin_info.txt || true
+      - name: 🔌 Start tmate session and capture SSH
+        run: |
+          if ! command -v tmate >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y tmate
+          fi
+          VPS_NAME="${GITHUB_EVENT_CLIENT_PAYLOAD_VPS_NAME:-autovps}"
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+          SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
+          echo "$SSH" | tee "links/${VPS_NAME}.txt"
+          echo "SSH:$SSH" >> links/admin_info.txt || true
 
       - name: 💾 Dump MySQL DB (backup)
         run: |
           mkdir -p .backup
           docker exec pterodactyl_mysql sh -c 'exec mysqldump -uptero -ppteropass pterodactyl_db' > .backup/pterodactyl.sql || true
-          # save wings config into backup
           cp temp/wings.yml .backup/wings.yml || true
 
       - name: 💾 Save panel files (best-effort)
         run: |
-          # attempt to archive panel path from the container (best-effort)
           rm -f .backup/panel_files.tar.gz || true
           docker exec pterodactyl sh -c "tar -czf /tmp/panel_files.tar.gz /var/www/pterodactyl 2>/dev/null || true" || true
           docker cp pterodactyl:/tmp/panel_files.tar.gz .backup/panel_files.tar.gz 2>/dev/null || true
 
       - name: 💼 Pack all backups
         run: |
-          NAME="${{ github.event.client_payload.vps_name }}"
-          if [ -z "$NAME" ]; then NAME="autovps"; fi
-          zip -r ".backup/${NAME}.zip" .backup/* links/* 2>/dev/null || true
+          VPS_NAME="${GITHUB_EVENT_CLIENT_PAYLOAD_VPS_NAME:-autovps}"
+          zip -r ".backup/${VPS_NAME}.zip" .backup/* links/* 2>/dev/null || true
 
-      - name: 🛠 Prepare Git (sync remote to avoid non-fast-forward)
+      - name: 🛠 Prepare Git (sync remote)
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -215,28 +193,27 @@ EOF
       - name: ⬆️ Commit & Push backups
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "🔄 Updated SSH, Panel URL, admin info, and backups for ${{ github.event.client_payload.vps_name || 'autovps' }}"
+          commit_message: "🔄 Updated SSH, Panel URL, admin info, and backups for ${GITHUB_EVENT_CLIENT_PAYLOAD_VPS_NAME:-autovps}"
           file_pattern: 'links/*.txt .backup/*.zip .backup/*.sql .backup/*.yml'
           commit_user_name: "github-actions[bot]"
           commit_user_email: "41898282+github-actions[bot]@users.noreply.github.com"
           push_options: '--force-with-lease'
 
-      - name: 📩 Discord Notify (Panel URL, Admin, SSH)
+      - name: 📩 Discord Notify
         run: |
+          VPS_NAME="${GITHUB_EVENT_CLIENT_PAYLOAD_VPS_NAME:-autovps}"
           PANEL_URL=$(cat links/panel_url.txt || echo "unavailable")
-          SSH_URL=$(cat "links/${{ github.event.client_payload.vps_name || 'autovps' }}.txt" || echo "unavailable")
+          SSH_URL=$(cat "links/${VPS_NAME}.txt" || echo "unavailable")
           ADMIN_INFO=$(cat links/admin_info.txt || echo "admin@example.com / AdminPass123")
-          # Build message with jq to keep JSON safe
           CONTENT="🖥️ **Pterodactyl Panel Ready!**\n\n🌐 URL: ${PANEL_URL}\n👤 Admin: ${ADMIN_INFO}\n\n🔗 SSH: ${SSH_URL}\n\n⚡ Link rotates every ~6h."
           JSON=$(jq -n --arg content "$CONTENT" '{content: $content}')
           curl -H "Content-Type: application/json" -X POST -d "$JSON" "$DISCORD_WEBHOOK" || true
 
-      - name: 🔁 Schedule re-dispatch (auto-restart) & keep alive
+      - name: 🔁 Schedule re-dispatch (auto-restart)
         env:
           REPO: ${{ github.repository }}
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # schedule re-dispatch in background (~340 minutes)
           PAYLOAD=$(jq -n --arg n "autovps" '{event_type: "create-vps", client_payload: { vps_name: $n, backup: true }}')
           (
             sleep $((340*60))
@@ -245,5 +222,5 @@ EOF
               -H "Authorization: token $TOKEN" \
               -d "$PAYLOAD" || true
           ) &
-          echo "Runner will stay alive for 355 minutes (keep session until re-dispatch)."
+          echo "Runner will stay alive for 355 minutes."
           sleep $((355*60))
