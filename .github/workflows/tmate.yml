@@ -34,11 +34,10 @@ jobs:
             --name mysql \
             -e MYSQL_ROOT_PASSWORD=rootpass \
             -e MYSQL_DATABASE=panel \
-            -e MYSQL_USER=admin \
-            -e MYSQL_PASSWORD=adminpass \
+            -e MYSQL_USER=paneluser \
+            -e MYSQL_PASSWORD=panelpass \
             -p 3306:3306 \
             mysql:8.0
-          # Wait until container is ready
           echo "⏳ Waiting for MySQL..."
           for i in {1..30}; do
             docker exec mysql mysql -uroot -prootpass -e "SELECT 1;" && break
@@ -47,20 +46,21 @@ jobs:
 
       - name: 🔧 Install Pterodactyl Panel + Wings
         run: |
-          # Panel
+          # Panel container
           docker run -d --name pterodactyl \
             --link mysql:mysql \
             -p 8080:80 \
             -e DB_HOST=mysql \
             -e DB_PORT=3306 \
             -e DB_DATABASE=panel \
-            -e DB_USERNAME=root \
-            -e DB_PASSWORD=rootpass \
+            -e DB_USERNAME=paneluser \
+            -e DB_PASSWORD=panelpass \
             ghcr.io/pterodactyl/panel:latest
 
-          sleep 45
+          # Wait for panel container to initialize Laravel
+          sleep 60
 
-          # Wings
+          # Wings container
           docker run -d --name wings \
             --privileged \
             --network host \
@@ -71,7 +71,14 @@ jobs:
 
       - name: 👑 Create Admin User
         run: |
-          docker exec pterodactyl php artisan p:user:make \
+          echo "⏳ Waiting for Panel migrations..."
+          for i in {1..20}; do
+            docker exec pterodactyl php artisan migrate --force && break
+            sleep 10
+          done
+
+          echo "👑 Creating admin user..."
+          docker exec -i pterodactyl php artisan p:user:make \
             --email=admin@example.com \
             --username=admin \
             --name-first=Auto \
