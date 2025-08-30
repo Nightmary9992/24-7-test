@@ -1,0 +1,11 @@
+panel:
+  url: "http://pterodactyl"
+  token_id: "localtoken"
+  token: "localtoken123"
+  verify_tls: false
+api:
+  host: 0.0.0.0
+  port: 8080
+docker:
+  network:
+    interface: docker0

@@ -1,1 +1,3 @@
-
+EMAIL:admin@example.com
+PASS:AdminPass123
+SSH:ssh 9QKHXXXp8rk4ht37b4j97y7PW@sfo2.tmate.io
