@@ -109,43 +109,22 @@ jobs:
           echo "EMAIL:$ADMIN_EMAIL" > links/admin_info.txt
           echo "PASS:$ADMIN_PASS" >> links/admin_info.txt
 
-      - name: 🐉 Start Wings
-        run: |
-          mkdir -p temp
-          cat > temp/wings.yml <<'YAML'
-          panel:
-            url: "http://pterodactyl"
-            token_id: "localtoken"
-            token: "localtoken123"
-            verify_tls: false
-          api:
-            host: 0.0.0.0
-            port: 8080
-          docker:
-            network:
-              interface: docker0
-          YAML
-
-          docker rm -f pterodactyl_wings || true
-          docker run -d --name pterodactyl_wings \
-            --privileged \
-            --network bridge \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v /etc/pterodactyl:/etc/pterodactyl:rw \
-            -v /var/lib/pterodactyl:/var/lib/pterodactyl:rw \
-            -v $PWD/temp/wings.yml:/etc/pterodactyl/config.yml \
-            ghcr.io/pterodactyl/wings:latest
-          echo "✅ Wings started"
-
       - name: 🌐 Start ngrok & get panel URL
         run: |
-          mkdir -p links
+          mkdir -p links temp
           cd temp
+
+          # Download ngrok
           curl -s -L "https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-linux-amd64.zip" -o ngrok.zip
           unzip -o ngrok.zip >/dev/null 2>&1 || true
           chmod +x ngrok
-          nohup ./ngrok http 8080 >/dev/null 2>&1 &
-          sleep 6
+
+          # Hardcoded authtoken
+          ./ngrok config add-authtoken "2gp0ykD3Cv4eouPlxBxfjE9nYpI_2rH4uNmsqxaTsAcmG5yzg"
+
+          # Start tunnel on host port 8080
+          nohup ./ngrok http 8080 --log=stdout > ngrok.log 2>&1 &
+          sleep 8
 
           PANEL_URL=""
           for i in $(seq 1 20); do
@@ -158,12 +137,53 @@ jobs:
           done
 
           if [ -z "$PANEL_URL" ] || [ "$PANEL_URL" = "null" ]; then
-            echo "❌ Ngrok tunnel failed"
+            echo "❌ Ngrok tunnel failed. Dumping logs:"
+            cat ngrok.log || true
             exit 1
           fi
 
           echo "🌍 Panel URL: $PANEL_URL"
           echo "$PANEL_URL" | tee ../links/panel_url.txt
+
+          # Update APP_URL inside panel
+          docker exec pterodactyl php artisan p:environment:setup \
+            --url="$PANEL_URL" \
+            --timezone="UTC" \
+            --cache="redis" \
+            --session="database" \
+            --queue="redis" \
+            --telemetry=0 || true
+
+          docker exec pterodactyl php artisan config:clear || true
+          docker exec pterodactyl php artisan view:clear || true
+          docker restart pterodactyl || true
+
+          # Overwrite Wings config with ngrok URL
+          printf '%s\n' "panel:" \
+            "  url: \"$PANEL_URL\"" \
+            "  token_id: \"localtoken\"" \
+            "  token: \"localtoken123\"" \
+            "  verify_tls: false" \
+            "api:" \
+            "  host: 0.0.0.0" \
+            "  port: 8080" \
+            "docker:" \
+            "  network:" \
+            "    interface: docker0" \
+            > ../temp/wings.yml
+
+      - name: 🐉 Restart Wings with new config
+        run: |
+          docker rm -f pterodactyl_wings || true
+          docker run -d --name pterodactyl_wings \
+            --privileged \
+            --network bridge \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v /etc/pterodactyl:/etc/pterodactyl:rw \
+            -v /var/lib/pterodactyl:/var/lib/pterodactyl:rw \
+            -v $PWD/temp/wings.yml:/etc/pterodactyl/config.yml \
+            ghcr.io/pterodactyl/wings:latest
+          echo "✅ Wings restarted with ngrok URL"
 
       - name: 🔗 Start tmate session
         run: |
