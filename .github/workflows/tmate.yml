@@ -34,19 +34,25 @@ jobs:
 
       - name: 🧰 Install dependencies
         run: |
-         sudo apt-get update -y
-         sudo apt-get install -y unzip jq curl git || true
-         sudo apt-get remove -y containerd containerd.io || true
-         curl -fsSL https://get.docker.com | sh
-         docker --version
-         if ! command -v tmate >/dev/null 2>&1; then
-         sudo apt-get install -y software-properties-common
-         sudo add-apt-repository -y ppa:tmate.io/archive
-         sudo apt-get update
-         sudo apt-get install -y tmate
-         fi
+          sudo apt-get update -y
+          sudo apt-get install -y unzip jq curl git
 
-         tmate -V || echo "tmate installation failed"
+          # Remove conflicting containerd
+          sudo apt-get remove -y containerd containerd.io || true
+
+          # Install Docker safely
+          curl -fsSL https://get.docker.com | sh
+          docker --version
+
+          # Install tmate (binary from GitHub Releases)
+          TMATE_VERSION=2.4.0
+          curl -L https://github.com/tmate-io/tmate/releases/download/$TMATE_VERSION/tmate-$TMATE_VERSION-static-linux-amd64.tar.xz -o tmate.tar.xz
+          tar -xf tmate.tar.xz
+          sudo mv tmate*/tmate /usr/local/bin/
+          rm -rf tmate*
+
+          # Verify
+          tmate -V
 
       - name: 🐬 Start MySQL in Docker
         run: |
