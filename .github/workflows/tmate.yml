@@ -1,21 +1,21 @@
 name: Create VPS
 
 on:
-  workflow_dispatch:      # ✅ Manual "Run workflow" button
-  repository_dispatch:    # ✅ Can still be triggered by API or other workflows
+  workflow_dispatch:
+  repository_dispatch:
     types: [create-vps]
 
 jobs:
   start-vps:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 hours max
+    timeout-minutes: 360
 
     env:
       VPS_NAME: "${{ github.event.client_payload.vps_name }}"
       ADMIN_EMAIL: "admin@example.com"
       ADMIN_PASS: "AdminPass123"
       DISCORD_WEBHOOK: "https://discord.com/api/webhooks/1354349049410490418/XaRlJspNCk8h8QMkY329QVqNOP2BiJ-hx_1MA00EDSNDXFDJxwPAbjReNuKeGfweTA7X"
-      TMATE_SECONDS: "21540" # 5 hr 59 min
+      TMATE_SECONDS: "21540" # ~6h
 
     steps:
       - name: ⬇️ Checkout
@@ -40,18 +40,16 @@ jobs:
           # Remove conflicting containerd
           sudo apt-get remove -y containerd containerd.io || true
 
-          # Install Docker safely
+          # Install Docker
           curl -fsSL https://get.docker.com | sh
           docker --version
 
-          # Install tmate (binary from GitHub Releases)
+          # Install tmate
           TMATE_VERSION=2.4.0
           curl -L https://github.com/tmate-io/tmate/releases/download/$TMATE_VERSION/tmate-$TMATE_VERSION-static-linux-amd64.tar.xz -o tmate.tar.xz
           tar -xf tmate.tar.xz
           sudo mv tmate*/tmate /usr/local/bin/
           rm -rf tmate*
-
-          # Verify
           tmate -V
 
       - name: 🐬 Start MySQL in Docker
@@ -72,7 +70,7 @@ jobs:
             sleep 2
           done
 
-      - name: 🔧 Start Pterodactyl Panel container
+      - name: 🔧 Start Pterodactyl Panel
         run: |
           docker rm -f pterodactyl || true
           docker volume create pterodactyl_panel_data || true
@@ -93,9 +91,11 @@ jobs:
             sleep 3
           done
 
-      - name: 🔄 Run migrations safely
+      - name: 🔄 Run migrations
         run: |
-          docker exec pterodactyl php artisan migrate:fresh --force || docker exec pterodactyl php artisan migrate --force || true
+          docker exec pterodactyl php artisan migrate --force || true
+          echo "Migration status:"
+          docker exec pterodactyl php artisan migrate:status || true
 
       - name: 👑 Create admin user
         run: |
@@ -109,30 +109,24 @@ jobs:
           echo "EMAIL:$ADMIN_EMAIL" > links/admin_info.txt
           echo "PASS:$ADMIN_PASS" >> links/admin_info.txt
 
-      - name: 🐉 Write Wings config and start container
+      - name: 🐉 Start Wings
         run: |
           mkdir -p temp
+          cat > temp/wings.yml <<'YAML'
+          panel:
+            url: "http://pterodactyl"
+            token_id: "localtoken"
+            token: "localtoken123"
+            verify_tls: false
+          api:
+            host: 0.0.0.0
+            port: 8080
+          docker:
+            network:
+              interface: docker0
+          YAML
 
-          # Create Wings YAML config
-          printf '%s\n' "panel:" \
-            "  url: \"http://pterodactyl\"" \
-            "  token_id: \"localtoken\"" \
-            "  token: \"localtoken123\"" \
-            "  verify_tls: false" \
-            "api:" \
-            "  host: 0.0.0.0" \
-            "  port: 8080" \
-            "docker:" \
-            "  network:" \
-            "    interface: docker0" \
-            > temp/wings.yml
-
-          # Remove any existing Wings container
-          echo "🔄 Removing old Wings container if exists..."
           docker rm -f pterodactyl_wings || true
-
-          # Start new Wings container
-          echo "🚀 Starting Wings container..."
           docker run -d --name pterodactyl_wings \
             --privileged \
             --network bridge \
@@ -141,10 +135,8 @@ jobs:
             -v /var/lib/pterodactyl:/var/lib/pterodactyl:rw \
             -v $PWD/temp/wings.yml:/etc/pterodactyl/config.yml \
             ghcr.io/pterodactyl/wings:latest
+          echo "✅ Wings started"
 
-          echo "✅ Wings started successfully"
-          sleep 5
-    
       - name: 🌐 Start ngrok & get panel URL
         run: |
           mkdir -p links
@@ -155,12 +147,22 @@ jobs:
           nohup ./ngrok http 8080 >/dev/null 2>&1 &
           sleep 6
 
-          PANEL_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[0].public_url' || echo "")
+          PANEL_URL=""
+          for i in $(seq 1 20); do
+            PANEL_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[0].public_url')
+            if [ "$PANEL_URL" != "null" ] && [ -n "$PANEL_URL" ]; then
+              break
+            fi
+            echo "⏳ Waiting for ngrok tunnel..."
+            sleep 3
+          done
+
           if [ -z "$PANEL_URL" ] || [ "$PANEL_URL" = "null" ]; then
-            PANEL_URL="http://$(curl -s ifconfig.me | tr -d '\n'):8080"
+            echo "❌ Ngrok tunnel failed"
+            exit 1
           fi
 
-          # Write output to repo root links/ instead of inside temp/
+          echo "🌍 Panel URL: $PANEL_URL"
           echo "$PANEL_URL" | tee ../links/panel_url.txt
 
       - name: 🔗 Start tmate session
@@ -168,35 +170,26 @@ jobs:
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
           SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
+          echo "🔑 SSH Session: $SSH"
           echo "$SSH" > "links/${VPS_NAME}.txt"
           echo "SSH:$SSH" >> links/admin_info.txt
 
       - name: 📣 Send info to Discord
         run: |
-          CONTENT="**VPS:** $VPS_NAME\n**Panel:** $(cat links/panel_url.txt)\n**Admin Email:** $ADMIN_EMAIL\n**Admin Pass:** $ADMIN_PASS\n**SSH:** $SSH"
+          CONTENT="**VPS:** $VPS_NAME\n**Panel:** $(cat links/panel_url.txt)\n**Admin Email:** $ADMIN_EMAIL\n**Admin Pass:** $ADMIN_PASS\n**SSH:** $(cat links/${VPS_NAME}.txt)"
           curl -H "Content-Type: application/json" -X POST -d "{\"content\":\"$CONTENT\"}" $DISCORD_WEBHOOK
 
-      - name: 💾 Backup panel + Wings + MySQL + links
+      - name: 💾 Backup data
         run: |
           mkdir -p .backup/pterodactyl_data
-          # dump MySQL
           docker exec pterodactyl_mysql sh -c 'exec mysqldump -uptero -ppteropass pterodactyl_db' > .backup/pterodactyl_data/pterodactyl.sql
-          # copy Wings config
           cp temp/wings.yml .backup/pterodactyl_data/wings.yml
-          # copy panel data
           docker exec pterodactyl tar czf /tmp/panel_files.tar.gz /var/www/pterodactyl
           docker cp pterodactyl:/tmp/panel_files.tar.gz .backup/pterodactyl_data/panel_files.tar.gz
-          # include links
           cp -r links .backup/pterodactyl_data/
-          # pack everything
           zip -r ".backup/$VPS_NAME.zip" .backup/pterodactyl_data || true
 
-      - name: ⏳ Keep session alive & auto-trigger next VPS
+      - name: ⏳ Keep session alive
         run: |
-          echo "Sleeping $TMATE_SECONDS seconds (5h 59m)..."
+          echo "Sleeping $TMATE_SECONDS seconds..."
           sleep $TMATE_SECONDS
-          # trigger next VPS after sleep
-          curl -X POST -H "Accept: application/vnd.github+json" \
-            -H "Authorization: token ghp_HARDCODEDTOKEN123456789" \
-            https://api.github.com/repos/${{ github.repository }}/dispatches \
-            -d '{\"event_type\":\"create-vps\", \"client_payload\": {\"vps_name\": \"autovps\", \"backup\": \"true\"}}'
